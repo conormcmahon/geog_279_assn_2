@@ -1,0 +1,127 @@
+---
+title: "Assignment 2"
+author: "Conor McMahon"
+date: "11/16/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(here)
+library(kableExtra)
+library(janitor)
+
+```
+
+# Data Description: 
+
+From the lab handout: 
+
+*Imagine we have the following data from Beijing . A survey was conducted of weekly work hours across 100 blocks in the city in February and once again in June of the same year. A power plant in region A was shut down in April. A random, representative sample of households was drawn in each block. We have data on average weekly work hours aggregated at the block level. The survey also collected data on visits to health clinics related to respiratory complaints. For each block we also have data on harmful particulate matter (PM 2.5) levels for the week preceding the survey collected from pollution monitoring stations. The blocks are split into two regions – Region A and Region B. The plant was located in proximity to the blocks in Region A. The Region B blocks are much further away from the plant. The data is available in the file assignment2.xls. The variables are: blockid – an identifier for city block; regionid - identifier for region in which block is located; month -  survey month; PM – PM 2.5 level in ppm; resp – number of respiratory complaints per 10,000 people. Indicator variables were created for Treatment (Region A) and After (June).  Using this data answer the following questions:*
+
+# Part A - Summary Stats
+
+First, we'll estimate the average PM 2.5 particulate pollution levels in each region during February and June: 
+
+```{r, message=FALSE}
+
+# Load Input Data
+beijing_data <- read_csv(here::here("assignment2_data.csv")) %>% 
+  janitor::clean_names()
+
+# Generate and Display Summary Data
+pm_summaries_regional <- beijing_data %>% 
+  group_by(regionid, month) %>% 
+  filter(month %in% c("Feb","June")) %>% 
+  summarize(pm_2p5_avg = mean(pm_2_5))
+kbl(pm_summaries_regional) %>%
+  kable_styling()
+
+# Visualize Distributions across Regions / Months
+ggplot(beijing_data %>% filter(month=="Feb") %>% drop_na()) +
+  geom_histogram(aes(x=pm_2_5), binwidth=2.0) +
+  facet_wrap(~regionid, nrow=2) + 
+  ggtitle("Distribution of February PM 2.5 Values by Region") + 
+  xlab("PM 2.5 Value") + 
+  ylab("Frequency")
+ggplot(beijing_data %>% filter(month=="June") %>% drop_na()) +
+  geom_histogram(aes(x=pm_2_5), binwidth=2.0) +
+  facet_wrap(~regionid, nrow=2) + 
+  ggtitle("Distribution of June PM 2.5 Values by Region") + 
+  xlab("PM 2.5 Value") + 
+  ylab("Frequency")
+
+```
+
+# Part B - Single-site Change with Treatment
+
+Now we'll compare the means using a t-test. 
+
+```{r} 
+
+# Values in Region A before 
+region_a_before <- beijing_data %>% 
+  filter(month == "Feb",
+         regionid == "A") 
+region_a_after <- beijing_data %>% 
+  filter(month == "June",
+         regionid == "A")
+t_test_results <- t.test(region_a_before$pm_2_5, region_a_after$pm_2_5)
+print(t_test_results)
+
+```
+
+We can see above that there was a statistically significant decrease in PM 2.5 values within region A in June vs. February, down 60\% from 7.35 to 4.56 (t = 3.825, df=84.61, p-value<0.001). However, it is challenging to say whether this change resulted from the plant closing - it is possible that air pollution levels are just decreasing over time everywhere, or that there was an unusually clear day in June, or that summer months are just clearer than winter months for some reason. This might be a good measure of the effect of plant closure on air pollution if we could show that air pollution is otherwise very steady in time, and isn't fluctuating due to other factors. Alternatively, we could run a difference-in-differences approach, as in Part C!
+
+The two-sample t-test assumes:
+
+1) Data sets are independent - this is probably a tricky assumption here. The pre- and post-closure data are probably not really independent. 
+2) Data are continuous and normally distributed - the first part is fine, and the second part seems vaguely true from looking at the histograms above. 
+3) Data are randomly sampled from the population - we know the survey was a representative sample and not a completely random one, but that hopefully should also satisfy this requirement. 
+4) Both groups have the same variance - this also looks true-ish from the histograms. 
+
+# Part C - Difference in Differences Analysis
+
+Now we want to use the other, far-from-plant site as a control. We'll conduct a double difference-in-differences analysis to **see whether the change was greater near the site than far from the site**. For this to work, we need the following assumptions to hold: 
+
+1) The time-varying error term is not correlated by the treatment. That is, the background rate of change in particulate pollution isn't correlated with plant closure. If for example plants are mostly closed as a management intervention to protect areas where particular pollution is otherwise increasing (to offset smog from cars, maybe?) that could be a problem. Alternatively, maybe plants are more likely to be sited in 'industrial' parts of town, which are more likely to be experiencing gentrification and a corresponding background decrease in particulate pollution. 
+2) The pre-treatment trends were the same in both areas. We can't test this here with only two timestamps, but if we had more survey dates further back in time we could verify that the rate of change in both areas was the same before the plant closed.
+3) Stable Value Unit Treatment Assumption - the plant closing does not somehow affect region B. An example problem is if many people from region A lose their jobs after the plant closure and move to region A, thereby increasing car smog inputs there. 
+
+```{r}
+
+DiD <- (filter(pm_summaries_regional, month=="June", regionid=="A")$pm_2p5_avg - 
+          filter(pm_summaries_regional, month=="Feb", regionid=="A")$pm_2p5_avg) -
+       (filter(pm_summaries_regional, month=="June", regionid=="B")$pm_2p5_avg - 
+          filter(pm_summaries_regional, month=="Feb", regionid=="B")$pm_2p5_avg)
+              
+print(DiD)
+
+```
+
+As shown above, the decrease in PM 2.5 values was **-2.01 greater** in Region A (near the plant) than in Region B (far from the plant). This implies that the plant closing may have had a real impact here!
+
+# Part D - DiD Linear Regression
+
+Now we'll use a linear regression to estimate the impact of closeness-to-plant on the outcome within this area.
+
+```{r}
+
+# Binary value for 'treated (aka, is close to the plant)'
+beijing_data$treated <- 0
+beijing_data[beijing_data$month=="Feb",]$treated <- 1
+# Binary value for 'post-treatment'
+beijing_data$time <- 0
+beijing_data[beijing_data$regionid=="A",]$time <- 1
+
+# Linear Regression between Treatment (Closure) * Time and Response (PM 2.5)
+treatment_regression <- lm(data=beijing_data, pm_2_5 ~ time*treated)
+print(summary(treatment_regression))
+
+```
+
+The above regression found that there was a statistically significant correlation (R^2^=0.089, p-value<10e-5). The coefficient for the interaction term *time* \* *treated*, which is our estimate of the effect of plant closure on pollution, was 2.01 - as expected, the same value we got during Part C above. However, it's worth keeping in mind that because the R^2^ value is relatively low, the relationship only explains a relatively small fraction of the overall variance in particulate pollution across these sites. It seems like there is a lot of external complexity not captured here. 
+
+The intercept is equal to the Part A value for Region B in June (because in that case both *time* and *treated* were zero). The *time* coefficient gives the average decrease in PM 2.5 across all points between the first and second survey. Similarly, the *treatment* coefficient gives the average decrease in PM 2.5 between the near-plant and far-from-plant regions. 
